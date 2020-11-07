@@ -1,0 +1,112 @@
+---
+- name: Disable swap
+  command: swapoff -a
+  when: ansible_swaptotal_mb != 0
+  become: yes
+
+- name: Install bare-metal package requirements
+  pacman:
+    name:
+      - conntrack-tools
+      - iptables
+      - containerd
+      - docker
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Create docker group
+  group:
+    name: docker
+  become: yes
+
+- name: Add user to docker group
+  user:
+    groups: docker
+    append: yes
+    name: "{{ ansible_user }}"
+  become: yes
+
+- name: Enable docker daemon
+  systemd:
+    name: docker.service
+    enabled: yes
+    state: started
+  become: yes
+
+- name: Download latest minikube arm64 binary
+  get_url:
+    dest: /tmp/minikube-linux-arm64
+    url: "https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-arm64"
+    #url: "https://github.com/kubernetes/minikube/releases/download/v1.14.2/minikube-linux-arm64"
+    #checksum: sha256:https://github.com/kubernetes/minikube/releases/download/v1.14.2/minikube-linux-arm64.sha256 #FIXME: Unable to find a checksum for file 'minikube-linux-arm64'
+    #  https://github.com/ansible/ansible/blob/devel/lib/ansible/modules/get_url.py  -> Search "Unable to find a checksum for file" 
+    #  RCA -> file name is not included in minikube-linux-arm64.sha256 as is required. PR would be necessary to fix.
+  register: gettminiksha256  #WORKAROUND
+
+- name: WORKAROUND | Download latest sha256sum
+  get_url:
+    dest: /tmp/minikube-linux-arm64.sha256
+    url: "https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-arm64.sha256"
+  register: getrminiksha256  # remote minikube sha256
+
+- name: WORKAROUND | Capture output of remote sha256sum
+  command: "cat {{ getrminiksha256.dest }}"
+  register: rminiksha256
+  changed_when: false
+
+- name: WORKAROUND | Calculate latest minikube sha256sum
+  command: "sha256sum {{ gettminiksha256.dest }}"
+  register: tminiksha256  # target minikube sha256
+  changed_when: false
+
+- debug: var=rminiksha256.stdout
+- debug: var=tminiksha256.stdout
+
+- name: WORKAROUND | Compare remote and target sha256
+  meta: end_play
+  when: rminiksha256.stdout not in tminiksha256.stdout
+
+- name: Install minikube
+  command: install minikube-linux-arm64 /usr/local/bin/minikube
+  args:
+    chdir: /tmp
+    creates: /usr/local/bin/minikube
+  become: yes
+
+- name: Check minikube status
+  shell: >
+    minikube status |
+    grep 'host:' |
+    awk '{print $NF}'
+  register: minikube_status
+  become: yes
+  changed_when: false
+
+- name: Start minikube on bare-metal (driver=none)
+  command: minikube start --driver=none
+  when: '"Running" not in minikube_status.stdout'
+  become: yes
+
+- name: Create a service for minikube to start on boot
+  debug:
+    msg: #TODO create a service for minikube
+  become: yes
+
+- name: Get minikube version
+  shell: >
+    minikube version --short | awk '{print $NF}'
+  register: mkv
+  changed_when: false
+
+- name: Download kubectl binary
+  get_url:
+    dest: /tmp/kubectl
+    url: "https://storage.googleapis.com/kubernetes-release/release/{{ mkv.stdout }}/bin/linux/arm64/kubectl"
+
+- name: Install kubectl
+  command: install kubectl /usr/local/bin/kubectl
+  args:
+    chdir: /tmp
+    creates: /usr/local/bin/kubectl
+  become: yes
